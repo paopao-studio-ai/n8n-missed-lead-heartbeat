@@ -1,0 +1,283 @@
+{
+  "name": "Missed-lead heartbeat (lead leak alert)",
+  "nodes": [
+    {
+      "id": "n-sched",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n-manual",
+      "name": "Test run",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        240,
+        100
+      ],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-1",
+              "name": "leadsUrl",
+              "value": "https://docs.google.com/spreadsheets/d/e/YOUR_SHEET_ID/pub?output=csv",
+              "type": "string"
+            },
+            {
+              "id": "cfg-2",
+              "name": "alertWebhookUrl",
+              "value": "https://hooks.slack.com/services/YOUR/WEBHOOK/URL",
+              "type": "string"
+            },
+            {
+              "id": "cfg-3",
+              "name": "slaMinutes",
+              "value": 15,
+              "type": "number"
+            },
+            {
+              "id": "cfg-4",
+              "name": "ignoreOlderThanHours",
+              "value": 72,
+              "type": "number"
+            },
+            {
+              "id": "cfg-5",
+              "name": "idField",
+              "value": "id",
+              "type": "string"
+            },
+            {
+              "id": "cfg-6",
+              "name": "nameField",
+              "value": "name",
+              "type": "string"
+            },
+            {
+              "id": "cfg-7",
+              "name": "createdField",
+              "value": "created_at",
+              "type": "string"
+            },
+            {
+              "id": "cfg-8",
+              "name": "respondedField",
+              "value": "first_response_at",
+              "type": "string"
+            },
+            {
+              "id": "cfg-9",
+              "name": "statusField",
+              "value": "status",
+              "type": "string"
+            },
+            {
+              "id": "cfg-10",
+              "name": "respondedStatuses",
+              "value": "contacted,replied,won,lost,closed,spam",
+              "type": "string"
+            },
+            {
+              "id": "cfg-11",
+              "name": "ownerField",
+              "value": "owner",
+              "type": "string"
+            },
+            {
+              "id": "cfg-12",
+              "name": "nowOverride",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      }
+    },
+    {
+      "id": "n-fetch",
+      "name": "Fetch leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        100
+      ],
+      "parameters": {
+        "url": "={{ $json.leadsUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "data"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "n-find",
+      "name": "Find overdue leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        100
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// n8n Code node: \"Find overdue leads\" (mode: Run Once for All Items)\n// Reads the leads list fetched by the previous HTTP node (JSON array, {records|data|leads|items:[...]}, or CSV text)\n// and returns ONE item describing every lead that has waited longer than the SLA without a first response.\n// Returns [] when nothing is overdue, so the alert node does not run.\nconst cfg = $('Config').first().json;\nconst SLA_MIN = Number(cfg.slaMinutes) || 15;\nconst MAX_AGE_H = Number(cfg.ignoreOlderThanHours) || 72;\nconst F = {\n  id: cfg.idField || 'id',\n  name: cfg.nameField || 'name',\n  created: cfg.createdField || 'created_at',\n  responded: cfg.respondedField || 'first_response_at',\n  status: cfg.statusField || 'status',\n  owner: cfg.ownerField || 'owner',\n};\nconst doneStatuses = String(cfg.respondedStatuses || 'contacted,replied,won,lost,closed,spam')\n  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);\n\nfunction parseCsv(text) {\n  const rows = []; let row = []; let cell = ''; let q = false;\n  for (let i = 0; i < text.length; i++) {\n    const c = text[i];\n    if (q) {\n      if (c === '\"' && text[i + 1] === '\"') { cell += '\"'; i++; }\n      else if (c === '\"') q = false;\n      else cell += c;\n    } else if (c === '\"') q = true;\n    else if (c === ',') { row.push(cell); cell = ''; }\n    else if (c === '\\n' || c === '\\r') {\n      if (c === '\\r' && text[i + 1] === '\\n') i++;\n      row.push(cell); rows.push(row); row = []; cell = '';\n    } else cell += c;\n  }\n  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }\n  const clean = rows.filter(r => r.some(v => String(v).trim() !== ''));\n  if (!clean.length) return [];\n  const head = clean[0].map(h => h.trim());\n  return clean.slice(1).map(r => Object.fromEntries(head.map((h, i) => [h, (r[i] ?? '').trim()])));\n}\n\nfunction toLeads(raw) {\n  if (raw == null) return [];\n  if (typeof raw === 'string') {\n    const t = raw.trim();\n    if (!t) return [];\n    if (t[0] === '[' || t[0] === '{') return toLeads(JSON.parse(t));\n    return parseCsv(t);\n  }\n  if (Array.isArray(raw)) return raw.map(r => (r && r.fields && typeof r.fields === 'object') ? { id: r.id, ...r.fields } : r); // Airtable shape\n  for (const k of ['records', 'data', 'leads', 'items', 'results', 'rows']) if (Array.isArray(raw[k])) return toLeads(raw[k]);\n  return [raw];\n}\n\nfunction toMs(v) {\n  if (v === null || v === undefined || v === '') return NaN;\n  if (typeof v === 'number') return v < 1e12 ? v * 1000 : v; // seconds or ms epoch\n  const s = String(v).trim();\n  if (/^\\d{10,13}$/.test(s)) return toMs(Number(s));\n  return Date.parse(s);\n}\n\nconst inItems = $input.all();\nlet leads = [];\nif (inItems.length === 1 && (typeof inItems[0].json.data === 'string' || Array.isArray(inItems[0].json.data) || (inItems[0].json.data && typeof inItems[0].json.data === 'object'))) {\n  leads = toLeads(inItems[0].json.data);\n} else {\n  leads = inItems.map(i => i.json); // e.g. a Google Sheets / CRM node returning one item per row\n  if (leads.length === 1) leads = toLeads(leads[0]);\n}\n\nconst now = cfg.nowOverride ? toMs(cfg.nowOverride) : Date.now();\nconst store = $getWorkflowStaticData('global');\nstore.alerted = store.alerted || {};\nfor (const [k, t] of Object.entries(store.alerted)) if (now - t > MAX_AGE_H * 3600e3) delete store.alerted[k];\n\nconst overdue = []; let unparsable = 0;\nfor (const lead of leads) {\n  const created = toMs(lead[F.created]);\n  if (Number.isNaN(created)) { unparsable++; continue; }\n  const responded = String(lead[F.responded] ?? '').trim() !== '';\n  const status = String(lead[F.status] ?? '').trim().toLowerCase();\n  if (responded || doneStatuses.includes(status)) continue;\n  const waitedMin = Math.floor((now - created) / 60000);\n  if (waitedMin < SLA_MIN || waitedMin > MAX_AGE_H * 60) continue;\n  const key = String(lead[F.id] ?? `${lead[F.name] ?? ''}|${lead[F.created]}`);\n  if (store.alerted[key]) continue; // already alerted for this lead\n  overdue.push({ key, name: lead[F.name] || '(no name)', owner: lead[F.owner] || '', waitedMin, created: new Date(created).toISOString() });\n}\nif (!overdue.length) return [];\noverdue.sort((a, b) => b.waitedMin - a.waitedMin);\nfor (const o of overdue) store.alerted[o.key] = now;\n\nconst fmt = m => (m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`);\nconst lines = overdue.slice(0, 15).map(o => `• ${o.name} — waiting ${fmt(o.waitedMin)}${o.owner ? ` (owner: ${o.owner})` : ' (NO OWNER)'}`);\nif (overdue.length > 15) lines.push(`…and ${overdue.length - 15} more`);\nconst text = `:rotating_light: ${overdue.length} lead(s) waiting longer than ${SLA_MIN} min with no first response\\n${lines.join('\\n')}` +\n  (unparsable ? `\\n(${unparsable} row(s) skipped: unreadable ${F.created})` : '');\nreturn [{ json: { count: overdue.length, text, leads: overdue, checkedAt: new Date(now).toISOString(), skippedRows: unparsable } }];\n"
+      }
+    },
+    {
+      "id": "n-alert",
+      "name": "Send alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        100
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.alertWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text, content: $json.text, count: $json.count, leads: $json.leads }) }}",
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "n-note1",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -380
+      ],
+      "parameters": {
+        "width": 520,
+        "height": 340,
+        "content": "## Missed-lead heartbeat\nEvery 5 min: fetch your leads, alert when any lead has waited longer than **slaMinutes** with no first response.\n\n**Setup (3 min)**\n1. Open **Config**: paste `leadsUrl` (Google Sheet → File → Share → Publish to web → CSV, or any JSON API/CRM export URL).\n2. Paste `alertWebhookUrl` (Slack incoming webhook, Discord webhook, or any URL that accepts POST JSON).\n3. Match the column names (`createdField`, `respondedField`, …) to your sheet.\n4. Click **Test workflow**, then **Activate**.\n\nAlerts are sent once per lead (dedupe needs the workflow to be active)."
+      }
+    },
+    {
+      "id": "n-note2",
+      "name": "Private CRM?",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        540,
+        -380
+      ],
+      "parameters": {
+        "width": 460,
+        "height": 340,
+        "content": "### Private sheet or CRM\nReplace **Fetch leads** with a Google Sheets / HubSpot / Airtable / Pipedrive node that returns one item per lead. **Find overdue leads** accepts both shapes.\n\n### Email or Telegram instead of a webhook\nReplace **Send alert** with Gmail / Send Email / Telegram and use `{{ $json.text }}` as the message.\n\nBuilt by Paopao Studio — need the full leak map? https://paopao-studio.pages.dev/?utm_source=n8n_template&utm_medium=template&utm_campaign=lead_leak_1029"
+      }
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test run": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch leads": {
+      "main": [
+        [
+          {
+            "node": "Find overdue leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find overdue leads": {
+      "main": [
+        [
+          {
+            "node": "Send alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
